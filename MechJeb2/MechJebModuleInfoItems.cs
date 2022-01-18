@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Threading;
 using UniLinq;
 using KSP.UI.Screens;
 using Smooth.Pools;
@@ -15,6 +16,11 @@ namespace MuMech
     {
         public MechJebModuleInfoItems(MechJebCore core) : base(core) { }
 
+        readonly Dictionary<CelestialBody,(Vector3d Maneuver, double BurnUT)> cachedDeorbits = new Dictionary<CelestialBody,(Vector3d Maneuver, double BurnUT)>();
+        protected System.Diagnostics.Stopwatch stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        long millisecondsBetweenSimulations=0;
+        bool running = false;
+
         //Provides a unified interface for getting the parts list in the editor or in flight:
         List<Part> parts
         {
@@ -23,6 +29,78 @@ namespace MuMech
                 return (HighLogic.LoadedSceneIsEditor) ? EditorLogic.fetch.ship.parts :
                     ((vessel == null) ? new List<Part>() : vessel.Parts);
             }
+        }
+        [GeneralInfoItem("#MechJeb_Deorbit_DeltaVAll",InfoItem.Category.Vessel)]//Deorbit Delta-V (All)
+        public void DeorbitDeltaV()
+        {
+            if (!running&&stopwatch.ElapsedMilliseconds>millisecondsBetweenSimulations)
+            {
+                running=true;
+
+                ThreadPool.QueueUserWorkItem((_) =>
+                {
+                    Orbit o = vessel.orbit;
+                    double universalTime = vesselState.time;
+
+                    double MainUT = o.NextApoapsisTime(universalTime);
+                    Vector3d maneuver = OrbitalManeuverCalculator.DeltaVToChangePeriapsis(o,MainUT,mainBody.Radius);
+                    cachedDeorbits[mainBody]=(Maneuver: maneuver, BurnUT: MainUT);
+
+                    foreach (CelestialBody body in mainBody.orbitingBodies)
+                    {
+                        o=vessel.orbit;
+                        Orbit targetOrbit=body.GetOrbit();
+                        universalTime=vesselState.time;
+                        double UT = 0;
+                        maneuver=OrbitalManeuverCalculator.DeltaVAndTimeForBiImpulsiveAnnealed(o,targetOrbit,universalTime,out UT,intercept_only: true);
+                        cachedDeorbits[body]=(Maneuver: maneuver, BurnUT: UT);
+                    }
+                    millisecondsBetweenSimulations=1000;
+                    stopwatch.Stop();
+                    stopwatch.Reset();
+                    stopwatch.Start();
+                    running=false;
+                });
+            }
+
+            GUILayout.BeginVertical();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Deorbit Stats   ",ColumnStyle);
+            GUILayout.BeginVertical();
+            GUILayout.Label("Body   ",ColumnStyle);
+            foreach (KeyValuePair<CelestialBody,(Vector3d Maneuver, double BurnUT)> entry in cachedDeorbits.OrderBy(key => key.Value.Maneuver.magnitude))
+            {
+                GUILayout.Label(entry.Key.bodyName+"   ",ColumnStyle);
+            }
+            GUILayout.EndVertical();
+
+            GUILayout.BeginVertical();
+            GUILayout.Label("Delta V   ",ColumnStyle);
+            foreach (KeyValuePair<CelestialBody,(Vector3d Maneuver, double BurnUT)> entry in cachedDeorbits.OrderBy(key => key.Value.Maneuver.magnitude))
+            {
+                GUILayout.Label(MuUtils.ToSI(entry.Value.Maneuver.magnitude,-1)+"m/s   ",ColumnStyle);
+            }
+            GUILayout.EndVertical();
+
+            GUILayout.BeginVertical();
+            GUILayout.Label("Create Node   ",ColumnStyle);
+            foreach (KeyValuePair<CelestialBody,(Vector3d Maneuver, double BurnUT)> entry in cachedDeorbits.OrderBy(key => key.Value.Maneuver.magnitude))
+            {
+
+                if (GUILayout.Button("Create Node   ",ColumnStyle))
+                {
+                    List<ManeuverParameters> NodeList = new List<ManeuverParameters>();
+                    NodeList.Add(new ManeuverParameters(entry.Value.Maneuver,entry.Value.BurnUT));
+                    foreach (ManeuverParameters Node in NodeList)
+                    {
+                        vessel.PlaceManeuverNode(vessel.orbit,Node.dV,Node.UT);
+                    }
+                }
+            }
+            GUILayout.EndVertical();
+
+            GUILayout.EndHorizontal();
+            GUILayout.EndVertical();
         }
 
         [ValueInfoItem("#MechJeb_NodeBurnTime", InfoItem.Category.Misc)]//Node burn time
